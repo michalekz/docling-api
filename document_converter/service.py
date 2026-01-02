@@ -7,9 +7,11 @@ from typing import List, Tuple
 from celery.result import AsyncResult
 from docling.datamodel.base_models import InputFormat, DocumentStream
 from docling.datamodel.pipeline_options import PdfPipelineOptions, EasyOcrOptions
-from docling.document_converter import PdfFormatOption, DocumentConverter
+from docling.document_converter import PdfFormatOption, ImageFormatOption, DocumentConverter
 from docling_core.types.doc import ImageRefMode, TableItem, PictureItem
 from fastapi import HTTPException
+from hierarchical.postprocessor import ResultPostprocessor
+from markitdown import MarkItDown
 
 from document_converter.schema import BatchConversionJobResult, ConversationJobResult, ConversionResult, ImageData
 from document_converter.utils import handle_csv_file
@@ -41,7 +43,7 @@ class DoclingDocumentConversion(DocumentConversionBase):
         # Or customize with your own pipeline options
         pipeline_options = PdfPipelineOptions()
         pipeline_options.do_ocr = True
-        pipeline_options.ocr_options = RapidOcrOptions()  # Use RapidOcrOptions instead of EasyOCR (note : you need to install the OCR package)
+        pipeline_options.ocr_options = EasyOcrOptions(lang=['cs', 'en'])  # Czech + English support
         pipeline_options.generate_page_images = True
 
         converter = DoclingDocumentConversion(pipeline_options=pipeline_options)
@@ -61,9 +63,52 @@ class DoclingDocumentConversion(DocumentConversionBase):
         pipeline_options = PdfPipelineOptions()
         pipeline_options.generate_page_images = False
         pipeline_options.generate_picture_images = True
-        pipeline_options.ocr_options = EasyOcrOptions(lang=["fr", "de", "es", "en", "it", "pt"])
+        pipeline_options.ocr_options = EasyOcrOptions(lang=["cs", "en"])  # Czech + English
 
         return pipeline_options
+
+    @staticmethod
+    def _is_office_document(filename: str) -> bool:
+        """Check if file is Office document that should use MarkItDown.
+
+        MarkItDown excels at Office formats (DOCX, XLSX, PPTX) with proper
+        structure preservation (headings, lists, tables).
+        """
+        office_extensions = {'.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt'}
+        return any(filename.lower().endswith(ext) for ext in office_extensions)
+
+    @staticmethod
+    def _convert_with_markitdown(filename: str, file: BytesIO) -> ConversionResult:
+        """Convert Office documents using MarkItDown.
+
+        MarkItDown is Microsoft's official tool for converting Office documents
+        to Markdown, providing superior structure preservation compared to Docling
+        for DOCX/XLSX/PPTX files.
+        """
+        try:
+            md = MarkItDown()
+
+            # MarkItDown needs file-like object with name attribute
+            file.name = filename
+            result = md.convert_stream(file)
+
+            # MarkItDown returns text_content (markdown string)
+            markdown = result.text_content
+
+            # Extract filename without extension
+            from pathlib import Path
+            doc_filename = Path(filename).stem
+
+            return ConversionResult(
+                filename=doc_filename,
+                markdown=markdown,
+                images=[]  # MarkItDown doesn't extract images separately
+            )
+
+        except Exception as e:
+            logging.error(f"MarkItDown failed to convert {filename}: {str(e)}")
+            from pathlib import Path
+            return ConversionResult(filename=Path(filename).stem, error=str(e))
 
     @staticmethod
     def _process_document_images(conv_res) -> Tuple[str, List[ImageData]]:
@@ -99,9 +144,18 @@ class DoclingDocumentConversion(DocumentConversionBase):
         image_resolution_scale: int = IMAGE_RESOLUTION_SCALE,
     ) -> ConversionResult:
         filename, file = document
+
+        # Office documents (DOCX, XLSX, PPTX) → MarkItDown for better structure preservation
+        if self._is_office_document(filename):
+            return self._convert_with_markitdown(filename, file)
+
+        # PDF/IMAGE documents → Docling with EasyOCR + ResultPostprocessor
         pipeline_options = self._update_pipeline_options(extract_tables, image_resolution_scale)
         doc_converter = DocumentConverter(
-            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+                InputFormat.IMAGE: ImageFormatOption(pipeline_options=pipeline_options),
+            }
         )
 
         if filename.lower().endswith('.csv'):
@@ -110,6 +164,10 @@ class DoclingDocumentConversion(DocumentConversionBase):
                 return ConversionResult(filename=filename, error=error)
 
         conv_res = doc_converter.convert(DocumentStream(name=filename, stream=file), raises_on_error=False)
+
+        # Apply hierarchical postprocessing to improve document structure
+        ResultPostprocessor(conv_res).process()
+
         doc_filename = conv_res.input.file.stem
 
         if conv_res.errors:
@@ -125,27 +183,50 @@ class DoclingDocumentConversion(DocumentConversionBase):
         extract_tables: bool = False,
         image_resolution_scale: int = IMAGE_RESOLUTION_SCALE,
     ) -> List[ConversionResult]:
-        pipeline_options = self._update_pipeline_options(extract_tables, image_resolution_scale)
-        doc_converter = DocumentConverter(
-            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
-        )
-
-        conv_results = doc_converter.convert_all(
-            [DocumentStream(name=filename, stream=file) for filename, file in documents],
-            raises_on_error=False,
-        )
-
         results = []
-        for conv_res in conv_results:
-            doc_filename = conv_res.input.file.stem
 
-            if conv_res.errors:
-                logging.error(f"Failed to convert {conv_res.input.name}: {conv_res.errors[0].error_message}")
-                results.append(ConversionResult(filename=conv_res.input.name, error=conv_res.errors[0].error_message))
-                continue
+        # Split documents by type: Office vs PDF/IMAGE
+        office_docs = []
+        docling_docs = []
 
-            content_md, images = self._process_document_images(conv_res)
-            results.append(ConversionResult(filename=doc_filename, markdown=content_md, images=images))
+        for filename, file in documents:
+            if self._is_office_document(filename):
+                office_docs.append((filename, file))
+            else:
+                docling_docs.append((filename, file))
+
+        # Process Office documents with MarkItDown
+        for filename, file in office_docs:
+            results.append(self._convert_with_markitdown(filename, file))
+
+        # Process PDF/IMAGE documents with Docling + EasyOCR + ResultPostprocessor
+        if docling_docs:
+            pipeline_options = self._update_pipeline_options(extract_tables, image_resolution_scale)
+            doc_converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+                    InputFormat.IMAGE: ImageFormatOption(pipeline_options=pipeline_options),
+                }
+            )
+
+            conv_results = doc_converter.convert_all(
+                [DocumentStream(name=filename, stream=file) for filename, file in docling_docs],
+                raises_on_error=False,
+            )
+
+            for conv_res in conv_results:
+                # Apply hierarchical postprocessing to improve document structure
+                ResultPostprocessor(conv_res).process()
+
+                doc_filename = conv_res.input.file.stem
+
+                if conv_res.errors:
+                    logging.error(f"Failed to convert {conv_res.input.name}: {conv_res.errors[0].error_message}")
+                    results.append(ConversionResult(filename=conv_res.input.name, error=conv_res.errors[0].error_message))
+                    continue
+
+                content_md, images = self._process_document_images(conv_res)
+                results.append(ConversionResult(filename=doc_filename, markdown=content_md, images=images))
 
         return results
 
