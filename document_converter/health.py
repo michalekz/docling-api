@@ -49,8 +49,8 @@ async def readiness_check(response: Response) -> Dict[str, Any]:
     try:
         from worker.celery_config import celery_app
 
-        # Ping Celery - check if workers are available
-        inspect = celery_app.control.inspect()
+        # Ping Celery - check if workers are available (with timeout)
+        inspect = celery_app.control.inspect(timeout=1.0)
         stats = inspect.stats()
 
         if stats:
@@ -115,7 +115,7 @@ async def metrics() -> Dict[str, Any]:
     try:
         from worker.celery_config import celery_app
 
-        inspect = celery_app.control.inspect()
+        inspect = celery_app.control.inspect(timeout=1.0)
         stats = inspect.stats()
         active = inspect.active()
 
