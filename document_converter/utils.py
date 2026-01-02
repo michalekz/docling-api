@@ -133,5 +133,11 @@ def mime_from_extension(ext):
     return mime
 
 
+def is_legacy_office_format(filename: str) -> bool:
+    """Check if file is a legacy Office format (.doc, .xls, .ppt)."""
+    legacy_extensions = {'.doc', '.xls', '.ppt'}
+    return any(filename.lower().endswith(ext) for ext in legacy_extensions)
+
+
 def is_file_format_supported(file_bytes: bytes, filename: str) -> bool:
     return guess_format(file_bytes, filename) in FormatToExtensions.keys()

@@ -4,7 +4,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile, Query
 
 from document_converter.schema import BatchConversionJobResult, ConversationJobResult, ConversionResult
 from document_converter.service import DocumentConverterService, DoclingDocumentConversion
-from document_converter.utils import is_file_format_supported
+from document_converter.utils import is_file_format_supported, is_legacy_office_format
 from worker.tasks import convert_document_task, convert_documents_task
 
 router = APIRouter()
@@ -27,6 +27,18 @@ async def convert_single_document(
     image_resolution_scale: int = Query(4, ge=1, le=4),
 ):
     file_bytes = await document.read()
+
+    # Check for legacy Office formats and provide helpful error
+    if is_legacy_office_format(document.filename):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Legacy Office format not supported: {document.filename}. "
+                f"Please convert to modern format (.docx, .xlsx, or .pptx) first. "
+                f"Supported formats: DOCX, XLSX, PPTX, PDF, PNG, JPEG, TIFF"
+            )
+        )
+
     if not is_file_format_supported(file_bytes, document.filename):
         raise HTTPException(status_code=400, detail=f"Unsupported file format: {document.filename}")
 
@@ -51,6 +63,18 @@ async def convert_multiple_documents(
     doc_streams = []
     for document in documents:
         file_bytes = await document.read()
+
+        # Check for legacy Office formats and provide helpful error
+        if is_legacy_office_format(document.filename):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Legacy Office format not supported: {document.filename}. "
+                    f"Please convert to modern format (.docx, .xlsx, or .pptx) first. "
+                    f"Supported formats: DOCX, XLSX, PPTX, PDF, PNG, JPEG, TIFF"
+                )
+            )
+
         if not is_file_format_supported(file_bytes, document.filename):
             raise HTTPException(status_code=400, detail=f"Unsupported file format: {document.filename}")
         doc_streams.append((document.filename, BytesIO(file_bytes)))
@@ -74,6 +98,18 @@ async def create_single_document_conversion_job(
     image_resolution_scale: int = Query(4, ge=1, le=4),
 ):
     file_bytes = await document.read()
+
+    # Check for legacy Office formats and provide helpful error
+    if is_legacy_office_format(document.filename):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Legacy Office format not supported: {document.filename}. "
+                f"Please convert to modern format (.docx, .xlsx, or .pptx) first. "
+                f"Supported formats: DOCX, XLSX, PPTX, PDF, PNG, JPEG, TIFF"
+            )
+        )
+
     if not is_file_format_supported(file_bytes, document.filename):
         raise HTTPException(status_code=400, detail=f"Unsupported file format: {document.filename}")
 
@@ -111,6 +147,18 @@ async def create_batch_conversion_job(
     doc_data = []
     for document in documents:
         file_bytes = await document.read()
+
+        # Check for legacy Office formats and provide helpful error
+        if is_legacy_office_format(document.filename):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Legacy Office format not supported: {document.filename}. "
+                    f"Please convert to modern format (.docx, .xlsx, or .pptx) first. "
+                    f"Supported formats: DOCX, XLSX, PPTX, PDF, PNG, JPEG, TIFF"
+                )
+            )
+
         if not is_file_format_supported(file_bytes, document.filename):
             raise HTTPException(status_code=400, detail=f"Unsupported file format: {document.filename}")
         doc_data.append((document.filename, file_bytes))

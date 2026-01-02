@@ -71,10 +71,13 @@ class DoclingDocumentConversion(DocumentConversionBase):
     def _is_office_document(filename: str) -> bool:
         """Check if file is Office document that should use MarkItDown.
 
-        MarkItDown excels at Office formats (DOCX, XLSX, PPTX) with proper
+        MarkItDown excels at modern Office formats (DOCX, XLSX, PPTX) with proper
         structure preservation (headings, lists, tables).
+
+        Note: Legacy formats (.doc, .xls, .ppt) are NOT supported.
         """
-        office_extensions = {'.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt'}
+        # Only modern Office formats (OpenXML) - legacy formats not supported
+        office_extensions = {'.docx', '.xlsx', '.pptx'}
         return any(filename.lower().endswith(ext) for ext in office_extensions)
 
     @staticmethod
@@ -144,6 +147,17 @@ class DoclingDocumentConversion(DocumentConversionBase):
         image_resolution_scale: int = IMAGE_RESOLUTION_SCALE,
     ) -> ConversionResult:
         filename, file = document
+
+        # Check for unsupported legacy Office formats
+        legacy_extensions = {'.doc', '.xls', '.ppt'}
+        if any(filename.lower().endswith(ext) for ext in legacy_extensions):
+            from pathlib import Path
+            error_msg = (
+                f"Legacy Office format not supported: {Path(filename).suffix}. "
+                f"Please convert to modern format (.docx, .xlsx, or .pptx) first. "
+                f"Supported formats: DOCX, XLSX, PPTX, PDF, PNG, JPEG, TIFF"
+            )
+            return ConversionResult(filename=Path(filename).stem, error=error_msg)
 
         # Office documents (DOCX, XLSX, PPTX) → MarkItDown for better structure preservation
         if self._is_office_document(filename):
