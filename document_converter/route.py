@@ -2,10 +2,17 @@ from io import BytesIO
 from typing import List
 from fastapi import APIRouter, File, HTTPException, UploadFile, Query
 
-from document_converter.schema import BatchConversionJobResult, ConversationJobResult, ConversionResult
+from document_converter.schema import (
+    BatchConversionJobResult,
+    ConversationJobResult,
+    ConversionResult,
+    BatchCancelRequest,
+    BatchCancelResponse
+)
 from document_converter.service import DocumentConverterService, DoclingDocumentConversion
 from document_converter.utils import is_file_format_supported, is_legacy_office_format
 from worker.tasks import convert_document_task, convert_documents_task
+from worker.celery_config import celery_app
 
 router = APIRouter()
 
@@ -130,6 +137,35 @@ async def create_single_document_conversion_job(
 )
 async def get_conversion_job_status(job_id: str):
     return document_converter_service.get_single_document_task_result(job_id)
+
+
+@router.post(
+    '/conversion-jobs/batch/cancel',
+    response_model=BatchCancelResponse,
+    description="Cancel multiple conversion jobs by their task IDs"
+)
+async def cancel_batch_conversion_jobs(request: BatchCancelRequest):
+    """
+    Cancel multiple Celery conversion tasks.
+
+    This will terminate the running tasks immediately.
+    Tasks that are already completed or failed will be ignored.
+    """
+    cancelled_tasks = []
+
+    for task_id in request.task_ids:
+        try:
+            # Revoke task with terminate=True to kill the worker process
+            celery_app.control.revoke(task_id, terminate=True, signal='SIGKILL')
+            cancelled_tasks.append(task_id)
+        except Exception as e:
+            # Log but continue with other tasks
+            print(f"Failed to cancel task {task_id}: {e}")
+
+    return BatchCancelResponse(
+        cancelled_count=len(cancelled_tasks),
+        task_ids=cancelled_tasks
+    )
 
 
 @router.post(

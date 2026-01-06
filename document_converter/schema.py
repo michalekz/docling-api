@@ -37,3 +37,12 @@ class BatchConversionJobResult(BaseModel):
         None, description="The status of the entire conversion jobs in the batch"
     )
     error: Optional[str] = Field(None, description="If the entire batch failed, this will be the error message")
+
+
+class BatchCancelRequest(BaseModel):
+    task_ids: List[str] = Field(..., description="List of Celery task IDs to cancel")
+
+
+class BatchCancelResponse(BaseModel):
+    cancelled_count: int = Field(..., description="Number of tasks successfully cancelled")
+    task_ids: List[str] = Field(..., description="List of task IDs that were cancelled")
