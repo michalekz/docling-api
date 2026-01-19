@@ -9,6 +9,7 @@ import filetype
 class InputFormat(str, Enum):
     DOCX = "docx"
     PPTX = "pptx"
+    XLSX = "xlsx"
     HTML = "html"
     IMAGE = "image"
     PDF = "pdf"
@@ -27,6 +28,7 @@ class OutputFormat(str, Enum):
 FormatToExtensions: Dict[InputFormat, List[str]] = {
     InputFormat.DOCX: ["docx", "dotx", "docm", "dotm"],
     InputFormat.PPTX: ["pptx", "potx", "ppsx", "pptm", "potm", "ppsm"],
+    InputFormat.XLSX: ["xlsx", "xlsm", "xltx", "xltm"],
     InputFormat.PDF: ["pdf"],
     InputFormat.MD: ["md"],
     InputFormat.HTML: ["html", "htm", "xhtml"],
@@ -44,6 +46,11 @@ FormatToMimeType: Dict[InputFormat, List[str]] = {
         "application/vnd.openxmlformats-officedocument.presentationml.template",
         "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ],
+    InputFormat.XLSX: [
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel.sheet.macroEnabled.12",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
     ],
     InputFormat.HTML: ["text/html", "application/xhtml+xml"],
     InputFormat.IMAGE: [
@@ -93,9 +100,13 @@ def guess_format(obj: bytes, filename: str = None):
             return InputFormat.CSV
 
         mime = filetype.guess_mime(content)
-        if mime is None:
+
+        # If MIME detection failed or returned unknown type, try extension fallback
+        if mime is None or mime not in MimeTypeToFormat:
             ext = filename.rsplit(".", 1)[-1] if ("." in filename and not filename.startswith(".")) else ""
-            mime = mime_from_extension(ext)
+            extension_mime = mime_from_extension(ext)
+            if extension_mime:
+                mime = extension_mime
 
     mime = mime or detect_html_xhtml(content)
     mime = mime or "text/plain"
@@ -120,15 +131,14 @@ def handle_csv_file(file: BytesIO) -> Tuple[BytesIO, Optional[str]]:
 
 
 def mime_from_extension(ext):
+    """Get MIME type from file extension."""
     mime = None
-    if ext in FormatToExtensions[InputFormat.ASCIIDOC]:
-        mime = FormatToMimeType[InputFormat.ASCIIDOC][0]
-    elif ext in FormatToExtensions[InputFormat.HTML]:
-        mime = FormatToMimeType[InputFormat.HTML][0]
-    elif ext in FormatToExtensions[InputFormat.MD]:
-        mime = FormatToMimeType[InputFormat.MD][0]
-    elif ext in FormatToExtensions[InputFormat.CSV]:
-        mime = FormatToMimeType[InputFormat.CSV][0]
+
+    # Check all format mappings
+    for input_format in InputFormat:
+        if ext in FormatToExtensions.get(input_format, []):
+            mime = FormatToMimeType.get(input_format, [None])[0]
+            break
 
     return mime
 

@@ -35,6 +35,16 @@ from .errors import (
     internal_error,
 )
 
+# LLM postprocessing (optional - requires litellm)
+try:
+    from .llm_postprocess import (
+        analyze_document_sync,
+        AnalysisResult,
+    )
+except ImportError:
+    analyze_document_sync = None
+    AnalysisResult = None
+
 __all__ = [
     # Database functions
     "init_db",
@@ -65,4 +75,7 @@ __all__ = [
     "conversion_failed_error",
     "invalid_parameter_error",
     "internal_error",
+    # LLM Postprocessing
+    "analyze_document_sync",
+    "AnalysisResult",
 ]

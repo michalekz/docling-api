@@ -20,6 +20,7 @@ class ConversionResult(BaseModel):
     filename: str = Field(None, description="The filename of the document")
     markdown: str = Field(None, description="The markdown content of the document")
     images: List[ImageData] = Field(default_factory=list, description="The images in the document")
+    pages: Optional[int] = Field(None, description="Number of pages in the document (PDF, DOCX, etc.)")
     error: Optional[str] = Field(None, description="The error that occurred during the conversion")
 
 

@@ -81,6 +81,51 @@ class DoclingDocumentConversion(DocumentConversionBase):
         return any(filename.lower().endswith(ext) for ext in office_extensions)
 
     @staticmethod
+    def _is_markdown_document(filename: str) -> bool:
+        """Check if file is Markdown document (no conversion needed)."""
+        markdown_extensions = {'.md', '.markdown'}
+        return any(filename.lower().endswith(ext) for ext in markdown_extensions)
+
+    @staticmethod
+    def _needs_hierarchical_postprocessing(filename: str) -> bool:
+        """Check if document type supports hierarchical postprocessing.
+
+        ResultPostprocessor requires provenance data and layout predictions,
+        which are only available for PDF and IMAGE formats (not HTML/MD/AsciiDoc).
+        """
+        # Only PDF and image formats have layout predictions and provenance data
+        pdf_image_extensions = {'.pdf', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'}
+        return any(filename.lower().endswith(ext) for ext in pdf_image_extensions)
+
+    @staticmethod
+    def _convert_markdown_passthrough(filename: str, file: BytesIO) -> ConversionResult:
+        """Pass through Markdown files as-is (already in target format).
+
+        Markdown files are already in Markdown format, so no conversion is needed.
+        Simply read and return the content.
+        """
+        try:
+            file.seek(0)
+            content = file.read().decode('utf-8')
+
+            from pathlib import Path
+            doc_filename = Path(filename).stem
+
+            return ConversionResult(
+                filename=doc_filename,
+                markdown=content,
+                images=[]
+            )
+
+        except UnicodeDecodeError as e:
+            logging.error(f"Failed to decode Markdown file {filename}: {str(e)}")
+            from pathlib import Path
+            return ConversionResult(
+                filename=Path(filename).stem,
+                error=f"Failed to decode Markdown file (encoding error): {str(e)}"
+            )
+
+    @staticmethod
     def _convert_with_markitdown(filename: str, file: BytesIO) -> ConversionResult:
         """Convert Office documents using MarkItDown.
 
@@ -163,7 +208,11 @@ class DoclingDocumentConversion(DocumentConversionBase):
         if self._is_office_document(filename):
             return self._convert_with_markitdown(filename, file)
 
-        # PDF/IMAGE documents → Docling with EasyOCR + ResultPostprocessor
+        # Markdown documents → Pass-through (already in target format)
+        if self._is_markdown_document(filename):
+            return self._convert_markdown_passthrough(filename, file)
+
+        # All other documents → Docling (PDF, IMAGE, HTML, AsciiDoc, CSV, etc.)
         pipeline_options = self._update_pipeline_options(extract_tables, image_resolution_scale)
         doc_converter = DocumentConverter(
             format_options={
@@ -179,8 +228,10 @@ class DoclingDocumentConversion(DocumentConversionBase):
 
         conv_res = doc_converter.convert(DocumentStream(name=filename, stream=file), raises_on_error=False)
 
-        # Apply hierarchical postprocessing to improve document structure
-        ResultPostprocessor(conv_res).process()
+        # Apply hierarchical postprocessing ONLY for PDF/IMAGE formats
+        # (requires provenance data and layout predictions not available in HTML/AsciiDoc/etc)
+        if self._needs_hierarchical_postprocessing(filename):
+            ResultPostprocessor(conv_res).process()
 
         doc_filename = conv_res.input.file.stem
 
@@ -189,7 +240,17 @@ class DoclingDocumentConversion(DocumentConversionBase):
             return ConversionResult(filename=doc_filename, error=conv_res.errors[0].error_message)
 
         content_md, images = self._process_document_images(conv_res)
-        return ConversionResult(filename=doc_filename, markdown=content_md, images=images)
+
+        # Extract page count from Docling document
+        pages = None
+        try:
+            if hasattr(conv_res, 'document') and hasattr(conv_res.document, 'num_pages'):
+                # num_pages is a method, not a property
+                pages = conv_res.document.num_pages()
+        except Exception as e:
+            logging.debug(f"Could not extract page count: {e}")
+
+        return ConversionResult(filename=doc_filename, markdown=content_md, images=images, pages=pages)
 
     def convert_batch(
         self,
@@ -199,13 +260,16 @@ class DoclingDocumentConversion(DocumentConversionBase):
     ) -> List[ConversionResult]:
         results = []
 
-        # Split documents by type: Office vs PDF/IMAGE
+        # Split documents by type: Office, Markdown, or Docling-based
         office_docs = []
+        markdown_docs = []
         docling_docs = []
 
         for filename, file in documents:
             if self._is_office_document(filename):
                 office_docs.append((filename, file))
+            elif self._is_markdown_document(filename):
+                markdown_docs.append((filename, file))
             else:
                 docling_docs.append((filename, file))
 
@@ -213,7 +277,11 @@ class DoclingDocumentConversion(DocumentConversionBase):
         for filename, file in office_docs:
             results.append(self._convert_with_markitdown(filename, file))
 
-        # Process PDF/IMAGE documents with Docling + EasyOCR + ResultPostprocessor
+        # Process Markdown documents with pass-through
+        for filename, file in markdown_docs:
+            results.append(self._convert_markdown_passthrough(filename, file))
+
+        # Process other documents with Docling (PDF, IMAGE, HTML, AsciiDoc, CSV, etc.)
         if docling_docs:
             pipeline_options = self._update_pipeline_options(extract_tables, image_resolution_scale)
             doc_converter = DocumentConverter(
@@ -228,9 +296,11 @@ class DoclingDocumentConversion(DocumentConversionBase):
                 raises_on_error=False,
             )
 
-            for conv_res in conv_results:
-                # Apply hierarchical postprocessing to improve document structure
-                ResultPostprocessor(conv_res).process()
+            for conv_res, (filename, _) in zip(conv_results, docling_docs):
+                # Apply hierarchical postprocessing ONLY for PDF/IMAGE formats
+                # (requires provenance data and layout predictions not available in HTML/AsciiDoc/etc)
+                if self._needs_hierarchical_postprocessing(filename):
+                    ResultPostprocessor(conv_res).process()
 
                 doc_filename = conv_res.input.file.stem
 
@@ -240,7 +310,17 @@ class DoclingDocumentConversion(DocumentConversionBase):
                     continue
 
                 content_md, images = self._process_document_images(conv_res)
-                results.append(ConversionResult(filename=doc_filename, markdown=content_md, images=images))
+
+                # Extract page count from Docling document
+                pages = None
+                try:
+                    if hasattr(conv_res, 'document') and hasattr(conv_res.document, 'num_pages'):
+                        # num_pages is a method, not a property
+                        pages = conv_res.document.num_pages()
+                except Exception as e:
+                    logging.debug(f"Could not extract page count: {e}")
+
+                results.append(ConversionResult(filename=doc_filename, markdown=content_md, images=images, pages=pages))
 
         return results
 

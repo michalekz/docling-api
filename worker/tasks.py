@@ -6,10 +6,11 @@ from worker.celery_config import celery_app
 
 # Import audit module for SQLite logging
 try:
-    from audit import update_job_started, update_job_complete, Status
+    from audit import update_job_started, update_job_complete, Status, analyze_document_sync
     AUDIT_ENABLED = True
 except ImportError:
     AUDIT_ENABLED = False
+    analyze_document_sync = None
 
 logger = logging.getLogger(__name__)
 
@@ -50,14 +51,38 @@ def convert_document_task(
         # Mark job as completed in SQLite
         if AUDIT_ENABLED and user_id:
             try:
-                # TODO: Extract pages from Docling result if available
+                # LLM postprocessing for metadata extraction
+                summary = None
+                category = None
+                tags = None
+                language = None
+
+                if analyze_document_sync and result.markdown:
+                    try:
+                        analysis = analyze_document_sync(result.markdown)
+                        if analysis:
+                            summary = analysis.summary
+                            category = analysis.category
+                            tags = analysis.tags
+                            language = analysis.language
+                            logger.info(f"LLM postprocessing done: category={category}, language={language}")
+                    except Exception as llm_error:
+                        logger.warning(f"LLM postprocessing failed (non-fatal): {llm_error}")
+
+                # Extract pages from conversion result (Docling provides this for PDF/images)
+                pages = getattr(result, 'pages', None)
+
                 update_job_complete(
                     job_id=job_id,
                     status=Status.SUCCESS.value,
-                    pages=None,  # Will be extracted from Docling in Phase 2
+                    pages=pages,
                     processing_time_ms=processing_time_ms,
                     result_url=None,  # Will be OneDrive URL
                     error=None,
+                    summary=summary,
+                    category=category,
+                    tags=tags,
+                    language=language,
                 )
             except Exception as e:
                 logger.warning(f"Failed to update job complete in audit: {e}")
