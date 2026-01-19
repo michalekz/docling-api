@@ -2,6 +2,14 @@ from pydantic import BaseModel, Field
 from typing import List, Literal, Optional
 
 
+# Status constants - unified across API and MCP
+class JobStatusEnum:
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    SUCCESS = "SUCCESS"
+    FAILURE = "FAILURE"
+
+
 class ImageData(BaseModel):
     type: Optional[Literal["table", "picture"]] = Field(None, description="The type of the image")
     filename: Optional[str] = Field(None, description="The filename of the image")
@@ -25,7 +33,15 @@ class ConversationJobResult(BaseModel):
     job_id: Optional[str] = Field(None, description="The id of the conversion job")
     result: Optional[ConversionResult] = Field(None, description="The result of the conversion job")
     error: Optional[str] = Field(None, description="The error that occurred during the conversion job")
-    status: Literal["IN_PROGRESS", "SUCCESS", "FAILURE"] = Field(None, description="The status of the conversion job")
+    status: Literal["PENDING", "IN_PROGRESS", "SUCCESS", "FAILURE"] = Field(None, description="The status of the conversion job")
+    # Extended metadata (Phase 1)
+    filename: Optional[str] = Field(None, description="Original filename")
+    file_type: Optional[str] = Field(None, description="Detected file type")
+    file_size: Optional[int] = Field(None, description="File size in bytes")
+    created_at: Optional[str] = Field(None, description="ISO 8601 timestamp of job creation")
+    completed_at: Optional[str] = Field(None, description="ISO 8601 timestamp of job completion")
+    pages: Optional[int] = Field(None, description="Number of pages (if available from Docling)")
+    processing_time_ms: Optional[int] = Field(None, description="Processing time in milliseconds")
 
 
 class BatchConversionJobResult(BaseModel):

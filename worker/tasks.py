@@ -1,6 +1,17 @@
-from typing import Any, Dict, List, Tuple
+import logging
+import time
+from typing import Any, Dict, List, Optional, Tuple
 from document_converter.service import IMAGE_RESOLUTION_SCALE, DoclingDocumentConversion, DocumentConverterService
 from worker.celery_config import celery_app
+
+# Import audit module for SQLite logging
+try:
+    from audit import update_job_started, update_job_complete, Status
+    AUDIT_ENABLED = True
+except ImportError:
+    AUDIT_ENABLED = False
+
+logger = logging.getLogger(__name__)
 
 
 @celery_app.task(name="celery.ping")
@@ -15,12 +26,60 @@ def convert_document_task(
     document: Tuple[str, bytes],
     extract_tables: bool = False,
     image_resolution_scale: int = IMAGE_RESOLUTION_SCALE,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    document_service = DocumentConverterService(document_converter=DoclingDocumentConversion())
-    result = document_service.convert_document_task(
-        document, extract_tables=extract_tables, image_resolution_scale=image_resolution_scale
-    )
-    return result.model_dump(exclude_unset=True)
+    job_id = self.request.id
+    start_time = time.time()
+
+    # Mark job as started in SQLite
+    if AUDIT_ENABLED and user_id:
+        try:
+            update_job_started(job_id)
+        except Exception as e:
+            logger.warning(f"Failed to update job started in audit: {e}")
+
+    try:
+        document_service = DocumentConverterService(document_converter=DoclingDocumentConversion())
+        result = document_service.convert_document_task(
+            document, extract_tables=extract_tables, image_resolution_scale=image_resolution_scale
+        )
+
+        processing_time_ms = int((time.time() - start_time) * 1000)
+        result_dict = result.model_dump(exclude_unset=True)
+
+        # Mark job as completed in SQLite
+        if AUDIT_ENABLED and user_id:
+            try:
+                # TODO: Extract pages from Docling result if available
+                update_job_complete(
+                    job_id=job_id,
+                    status=Status.SUCCESS.value,
+                    pages=None,  # Will be extracted from Docling in Phase 2
+                    processing_time_ms=processing_time_ms,
+                    result_url=None,  # Will be OneDrive URL
+                    error=None,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update job complete in audit: {e}")
+
+        return result_dict
+
+    except Exception as e:
+        processing_time_ms = int((time.time() - start_time) * 1000)
+
+        # Mark job as failed in SQLite
+        if AUDIT_ENABLED and user_id:
+            try:
+                update_job_complete(
+                    job_id=job_id,
+                    status=Status.FAILURE.value,
+                    processing_time_ms=processing_time_ms,
+                    error=str(e),
+                )
+            except Exception as audit_error:
+                logger.warning(f"Failed to update job failure in audit: {audit_error}")
+
+        raise
 
 
 @celery_app.task(bind=True, name="convert_documents")
@@ -29,9 +88,52 @@ def convert_documents_task(
     documents: List[Tuple[str, bytes]],
     extract_tables: bool = False,
     image_resolution_scale: int = IMAGE_RESOLUTION_SCALE,
+    user_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    document_service = DocumentConverterService(document_converter=DoclingDocumentConversion())
-    results = document_service.convert_documents_task(
-        documents, extract_tables=extract_tables, image_resolution_scale=image_resolution_scale
-    )
-    return [result.model_dump(exclude_unset=True) for result in results]
+    job_id = self.request.id
+    start_time = time.time()
+
+    # Mark job as started in SQLite
+    if AUDIT_ENABLED and user_id:
+        try:
+            update_job_started(job_id)
+        except Exception as e:
+            logger.warning(f"Failed to update batch job started in audit: {e}")
+
+    try:
+        document_service = DocumentConverterService(document_converter=DoclingDocumentConversion())
+        results = document_service.convert_documents_task(
+            documents, extract_tables=extract_tables, image_resolution_scale=image_resolution_scale
+        )
+
+        processing_time_ms = int((time.time() - start_time) * 1000)
+
+        # Mark job as completed in SQLite
+        if AUDIT_ENABLED and user_id:
+            try:
+                update_job_complete(
+                    job_id=job_id,
+                    status=Status.SUCCESS.value,
+                    processing_time_ms=processing_time_ms,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update batch job complete in audit: {e}")
+
+        return [result.model_dump(exclude_unset=True) for result in results]
+
+    except Exception as e:
+        processing_time_ms = int((time.time() - start_time) * 1000)
+
+        # Mark job as failed in SQLite
+        if AUDIT_ENABLED and user_id:
+            try:
+                update_job_complete(
+                    job_id=job_id,
+                    status=Status.FAILURE.value,
+                    processing_time_ms=processing_time_ms,
+                    error=str(e),
+                )
+            except Exception as audit_error:
+                logger.warning(f"Failed to update batch job failure in audit: {audit_error}")
+
+        raise

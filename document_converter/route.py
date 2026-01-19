@@ -1,18 +1,26 @@
 from io import BytesIO
-from typing import List
-from fastapi import APIRouter, File, HTTPException, UploadFile, Query
+from typing import List, Optional
+from fastapi import APIRouter, File, HTTPException, UploadFile, Query, Header
 
 from document_converter.schema import (
     BatchConversionJobResult,
     ConversationJobResult,
     ConversionResult,
     BatchCancelRequest,
-    BatchCancelResponse
+    BatchCancelResponse,
+    JobStatusEnum
 )
 from document_converter.service import DocumentConverterService, DoclingDocumentConversion
-from document_converter.utils import is_file_format_supported, is_legacy_office_format
+from document_converter.utils import is_file_format_supported, is_legacy_office_format, guess_format
 from worker.tasks import convert_document_task, convert_documents_task
 from worker.celery_config import celery_app
+
+# Import audit module for SQLite logging
+try:
+    from audit import insert_job, get_job, Status
+    AUDIT_ENABLED = True
+except ImportError:
+    AUDIT_ENABLED = False
 
 router = APIRouter()
 
@@ -103,6 +111,7 @@ async def create_single_document_conversion_job(
     document: UploadFile = File(...),
     extract_tables_as_images: bool = False,
     image_resolution_scale: int = Query(4, ge=1, le=4),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
 ):
     file_bytes = await document.read()
 
@@ -120,13 +129,37 @@ async def create_single_document_conversion_job(
     if not is_file_format_supported(file_bytes, document.filename):
         raise HTTPException(status_code=400, detail=f"Unsupported file format: {document.filename}")
 
+    # Detect file type for audit
+    detected_format = guess_format(file_bytes, document.filename)
+    file_type = detected_format.value if detected_format else None
+
     task = convert_document_task.delay(
         (document.filename, file_bytes),
         extract_tables=extract_tables_as_images,
         image_resolution_scale=image_resolution_scale,
+        user_id=x_user_id,
     )
 
-    return ConversationJobResult(job_id=task.id, status="IN_PROGRESS")
+    # Insert job into SQLite audit log
+    if AUDIT_ENABLED and x_user_id:
+        try:
+            insert_job(
+                job_id=task.id,
+                user_id=x_user_id,
+                filename=document.filename,
+                file_type=file_type,
+                file_size=len(file_bytes),
+            )
+        except Exception:
+            pass  # Don't fail the request if audit logging fails
+
+    return ConversationJobResult(
+        job_id=task.id,
+        status=JobStatusEnum.PENDING,
+        filename=document.filename,
+        file_type=file_type,
+        file_size=len(file_bytes),
+    )
 
 
 @router.get(
@@ -135,8 +168,38 @@ async def create_single_document_conversion_job(
     description="Get the status of a single document conversion job",
     response_model_exclude_unset=True,
 )
-async def get_conversion_job_status(job_id: str):
-    return document_converter_service.get_single_document_task_result(job_id)
+async def get_conversion_job_status(
+    job_id: str,
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+):
+    # Get Celery task result
+    celery_result = document_converter_service.get_single_document_task_result(job_id)
+
+    # Enrich with SQLite data if available
+    if AUDIT_ENABLED:
+        try:
+            # Pass user_id for access control
+            job_data = get_job(job_id, user_id=x_user_id)
+            if job_data:
+                # Merge SQLite data with Celery result
+                if job_data.filename:
+                    celery_result.filename = job_data.filename
+                if job_data.file_type:
+                    celery_result.file_type = job_data.file_type
+                if job_data.file_size:
+                    celery_result.file_size = job_data.file_size
+                if job_data.created_at:
+                    celery_result.created_at = job_data.created_at
+                if job_data.completed_at:
+                    celery_result.completed_at = job_data.completed_at
+                if job_data.pages:
+                    celery_result.pages = job_data.pages
+                if job_data.processing_time_ms:
+                    celery_result.processing_time_ms = job_data.processing_time_ms
+        except Exception:
+            pass  # Don't fail if SQLite lookup fails
+
+    return celery_result
 
 
 @router.post(
@@ -178,11 +241,14 @@ async def create_batch_conversion_job(
     documents: List[UploadFile] = File(...),
     extract_tables_as_images: bool = False,
     image_resolution_scale: int = Query(4, ge=1, le=4),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
 ):
     """Create a batch conversion job for multiple documents."""
     doc_data = []
+    total_size = 0
     for document in documents:
         file_bytes = await document.read()
+        total_size += len(file_bytes)
 
         # Check for legacy Office formats and provide helpful error
         if is_legacy_office_format(document.filename):
@@ -203,9 +269,24 @@ async def create_batch_conversion_job(
         doc_data,
         extract_tables=extract_tables_as_images,
         image_resolution_scale=image_resolution_scale,
+        user_id=x_user_id,
     )
 
-    return BatchConversionJobResult(job_id=task.id, status="IN_PROGRESS")
+    # Insert batch job into SQLite audit log
+    if AUDIT_ENABLED and x_user_id:
+        try:
+            filenames = ", ".join([d[0] for d in doc_data])
+            insert_job(
+                job_id=task.id,
+                user_id=x_user_id,
+                filename=f"[BATCH: {len(doc_data)} files] {filenames[:100]}",
+                file_type="batch",
+                file_size=total_size,
+            )
+        except Exception:
+            pass  # Don't fail the request if audit logging fails
+
+    return BatchConversionJobResult(job_id=task.id, status=JobStatusEnum.PENDING)
 
 
 @router.get(
